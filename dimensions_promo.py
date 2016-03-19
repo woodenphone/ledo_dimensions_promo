@@ -50,8 +50,6 @@ def flasher(instructions_file_path='led_seq_1.txt'):
     return    
 
 
-
-
 def demo_dummy(demo_number):
     # Simulate playing a movie and telling the toypad to do things while the movie plays
     print('Starting demo %s' % (demo_number))

@@ -21,6 +21,27 @@
 
 
 import time
+import platform
+
+# Lego Dimensions command constants
+# Model No.: 3000061482 for PS3/PS4/WiiU
+COMMAND_MAGIC_NUMBER = 0x55
+RESPONSE_MAGIC_NUMBER = 0x55
+VENDOR_ID = 0x0e6f# Logic3
+PRODUCT_ID = 0x0241# Lego Dimensions pad
+# Misc
+COMMAND_WAKE = 0xb0
+# L.E.D.
+COMMAND_SWITCH = 0xc0
+COMMAND_SWITCH_ALL = 0xc8
+COMMAND_FADE = 0xc6
+COMMAND_FADE_ALL = 0xc2
+COMMAND_FLASH = 0xc3
+COMMAND_FLASH_ALL = 0xc7
+# N.F.C.
+# TODO
+COMMAND_TAG_READ = 0xd2
+
 
 class Gateway():
     """
@@ -28,6 +49,8 @@ class Gateway():
     """
     def __init__(self,verbose=True):
         self.verbose = verbose
+        self.messages = {}
+        self.next_id = 0
         # Initialise USB connection to the device
         self.dev = self._init_usb()
         # Reset the state of the device to all pads off
@@ -38,24 +61,43 @@ class Gateway():
         """
         Connect to and initialise the portal
         """
-        import usb.core
-        import usb.util
-        # find our device
-        dev = usb.core.find(idVendor=0x0e6f)# 0x0e6f Logic3 (made lego dimensions portal hardware)
-
-        # was it found?
-        if dev is None:
-            raise ValueError('Device not found')
-
-        # set the active configuration. With no arguments, the first
-        # configuration will be the active one
-        dev.set_configuration()
-
-        # Initialise portal
         if self.verbose:
             print "Initialising portal"
-        dev.write(1, [0x55, 0x0f, 0xb0, 0x01, 0x28, 0x63, 0x29, 0x20, 0x4c, 0x45, 0x47, 0x4f, 0x20, 0x32, 0x30, 0x31, 0x34, 0xf7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])# Startup
+        activate = [0x55, 0x0f, 0xb0, 0x01, 0x28, 0x63, 0x29, 0x20, 0x4c, 0x45, 0x47, 0x4f, 0x20, 0x32, 0x30, 0x31, 0x34, 0xf7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+
+        if platform.system() == 'Darwin':
+          import hid
+          dev = hid.device()
+          dev.open(0x0E6F, 0x0241)
+          dev.write(activate)# Startup
+        else:
+          import usb.core
+          import usb.util
+          # find our device
+          #idVendor           0x0e6f Logic3
+          #idProduct          0x0241
+          dev = usb.core.find(idVendor=0x0e6f, idProduct=0x0241)# 0x0e6f Logic3 (made lego dimensions portal hardware)
+
+          # was it found?
+          if dev is None:
+              raise ValueError('Device not found')
+
+          # Fix for raspberry pi 'usb.core.USBError: [Errno 16] Resource busy'
+          # http://stackoverflow.com/questions/29345325/raspberry-pyusb-gets-resource-busy
+          if dev.is_kernel_driver_active(0):
+              reattach = True
+              dev.detach_kernel_driver(0)
+
+          # set the active configuration. With no arguments, the first
+          # configuration will be the active one
+          dev.set_configuration()
+          dev.write(1, activate)# Startup
+
         return dev
+
+    def message_id(self):
+        self.next_id = (self.next_id + 1) % 256
+        return self.next_id
 
     def generate_checksum_for_command(self,command):
         """
@@ -90,18 +132,45 @@ class Gateway():
         """Take the command, add checksum and padding, then send it"""
         assert(len(command) <= 31)# One byte must be left for the checksum
         packet = self.convert_command_to_packet(command)
+        message_id = packet[3]
+        self.messages[message_id] = packet
         if self.verbose:
             print("packet:"+repr(packet))
-        self.dev.write(1, packet)
+        if platform.system() == 'Darwin':
+            self.dev.write(packet)
+        else:
+            self.dev.write(1, packet)
 
-    def blank_pads(self):
+    def read_command(self):
+        LEN = 32
+        TIMEOUT = 250
+        packet = None
+        if platform.system() == 'Darwin':
+            packet = self.dev.read(LEN, TIMEOUT)
+        else:
+            packet = self.dev.read(0x81, LEN, timeout = TIMEOUT)
+        return packet
+
+    def send_read_page(self, tag_index, page_num):
+        command = [0x55, 0x04, COMMAND_TAG_READ, self.message_id(), tag_index, page_num,]
+        self.send_command(command)
+        return
+
+    def command_for_message_id(self, message_id):
+        return self.messages[message_id]
+
+    def blank_pad(self, pad_num):
         """
         Clear the pads to all off.
         """
         self.switch_pad(
-            pad = 0, # All pads
+            pad = pad_num,
             colour=(0,0,0)# RGB
             )
+        return
+
+    def blank_pads(self):
+        self.blank_pad(0) #All
         return
 
     def switch_pad(self, pad, colour):
@@ -113,7 +182,7 @@ class Gateway():
         Abstraction for command: 0xc0
         """
         red, green, blue = colour[0], colour[1], colour[2]
-        command = [0x55, 0x06, 0xc0, 0x02, pad, red, green, blue,]
+        command = [0x55, 0x06, 0xc0, self.message_id(), pad, red, green, blue,]
         self.send_command(command)
         return
 
@@ -129,7 +198,7 @@ class Gateway():
         Abstraction for command: 0xc3
         """
         red, green, blue = colour[0], colour[1], colour[2]
-        command = [0x55, 0x09, 0xc3, 0x1f, pad, on_length, off_length, pulse_count, red, green, blue]
+        command = [0x55, 0x09, 0xc3, self.message_id(), pad, on_length, off_length, pulse_count, red, green, blue]
         self.send_command(command)
         return
 
@@ -138,7 +207,7 @@ class Gateway():
         Fade one or all pad(s) a given colour with optional pulsing effect
         The pad(s) will either revert to old colour or stay on the new one depending on the pulse_count value
         Odd: keep new colour, Even: keep previous colour. Exception: 0x00 keeps new colour.
-        pulse_count values of 0x00 and above 0x199 will flash forever.
+        pulse_count values of 0x00 and above 199 will flash forever.
         pulse_time starts fast at 0x01 and continues to 0xff which is very slow, 0x00 causes immediate change.
         Pad numbering: 0:All, 1:Center, 2:Left, 3:Right
         Colour values are 0-255, with 0 being off and 255 being maximum
@@ -162,7 +231,7 @@ class Gateway():
 
         """
         assert(len(colours) == 3)
-        command = [0x55, 0x0e, 0xc8, 0x06,]# Start of command
+        command = [0x55, 0x0e, 0xc8, self.message_id(),]# Start of command
         for colour in colours:
             if len(colour) != 3:
                 # Disable command for this pad
